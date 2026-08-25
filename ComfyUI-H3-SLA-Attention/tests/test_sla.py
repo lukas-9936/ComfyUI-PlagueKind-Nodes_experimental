@@ -296,6 +296,31 @@ class Kernel(unittest.TestCase):
         want = torch.arange(n_pinned, device=lut.device)
         self.assertTrue(torch.equal(got, want.expand_as(got)))
 
+    def test_audio_range_does_not_pin_conditioning_prefix(self):
+        """Protect audio precisely instead of force-selecting refs before it."""
+        from h3u.sla.block_map import get_block_map
+
+        S = 16384
+        audio_start, audio_stop = 4096, 6144
+        torch.manual_seed(0)
+        q = torch.randn(1, S, H, D, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(1, S, H, D, device="cuda", dtype=torch.bfloat16)
+        lut, _ = get_block_map(
+            q, k, 0.05, 128, 64,
+            protect_ranges=((audio_start, audio_stop),),
+        )
+
+        first_audio = audio_start // 64
+        last_audio = audio_stop // 64
+        audio_blocks = torch.arange(first_audio, last_audio, device=lut.device)
+        has_audio = (lut.unsqueeze(-1).long() == audio_blocks).any(dim=-2)
+        self.assertTrue(has_audio.all(), "an audio block was not protected")
+
+        # There are more conditioning-prefix blocks than non-audio slots in
+        # this deliberately small top-k, so the full prefix cannot be pinned.
+        prefix_coverage = (lut.long() < first_audio).sum(dim=-1)
+        self.assertLess(prefix_coverage.max().item(), first_audio)
+
     def test_pinning_selects_the_same_blocks_at_zero_sparsity(self):
         """Pinning must decide *which* blocks, never alter their values.
 
