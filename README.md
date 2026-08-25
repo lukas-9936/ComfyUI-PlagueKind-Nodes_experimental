@@ -1,221 +1,108 @@
-# ComfyUI-PlagueKind-Nodes
+# ComfyUI-PlagueKind-Nodes_experimental
 
-ComfyUI custom nodes providing unified image and mask resizing with multiple scaling modes, aspect-ratio preservation, center crop alignment, stable tensor-based mask transformations, advanced LoRA stacking with audio/video branch control, and MiniMax-H3 attention/LoRA-compatibility fixes. The LoRA loader also functions as a standard LoRA loader for all compatible models, not limited to LTX workflows.
+Experimental fork of
+[PlagueKind/ComfyUI-PlagueKind-Nodes](https://github.com/PlagueKind/ComfyUI-PlagueKind-Nodes),
+currently based on PlagueKind v1.3.8.
 
----
+This fork keeps the original node pack but changes MiniMax H3 SLA Attention. It
+adds precise language/audio protection and an optional, independently tunable
+visual-reference quota. The other PlagueKind nodes are inherited unchanged.
 
-# Unified Resize Image / Mask
+> [!CAUTION]
+> Do **not** install this fork and the original PlagueKind repository at the
+> same time. Both packages register the same ComfyUI node identifiers. Keeping
+> both folders in `ComfyUI/custom_nodes` can cause duplicate registration,
+> unpredictable import order, or the wrong implementation being loaded.
+> Install exactly one version, then restart ComfyUI.
 
-A single ComfyUI node that ensures consistent resizing behavior between images and masks using a unified geometric pipeline.
+## What differs from PlagueKind v1.3.8
 
-<img width="256" height="256" alt="Screenshot_20260513_233656" src="https://github.com/user-attachments/assets/9c4f69dd-8e9a-4ad8-a28e-66760a087793" />
+### Precise language and audio protection
 
-### Features
+The original `protect_audio` implementation broadly protected every packed
+block before target video. With large image/video references, that also made
+all visual-reference blocks mandatory for every attention query.
 
-* Multiple scaling modes:
+This fork identifies the packed MiniMax H3 segments and always protects only:
 
-  * Dimensions (W × H)
-  * Multiplier
-  * Longer Side
-  * Shorter Side
-  * Total Pixels (MP)
+- actual language tokens;
+- reference-audio blocks;
+- target-audio blocks.
 
-* Aspect-ratio preservation option
+Qwen vision tokens and image/video-reference blocks are not removed. With
+reference protection set to `Off`, they return to ordinary score-based sparse
+top-k selection instead of being mandatory.
 
-* Center crop alignment
+Motion-stabilization history is limited to target-video query rows. Video
+stabilization continues to work, while text and audio routing is recalculated
+for each denoising step.
 
-* Divisible-by constraint (useful for latent models like LTX-2.3 / SDXL workflows, where other nodes only do one side.) Set divisible by 1 to disable.
+### Protect Video/Image Reference
 
-* Unified image + mask transformation pipeline
+The H3 SLA Attention node adds a three-mode control named
+`Protect Video/Image Reference`:
 
-* Stable tensor-based mask resizing (no PIL dependency issues)
+| Mode | Behaviour | Typical use |
+| --- | --- | --- |
+| `Off` | No dedicated reference quota. References still compete in ordinary global top-k. | Fastest option and the default. |
+| `Manual` | Guarantees a score-selected fraction of every visual-reference range. | Balance reference adherence against speed. |
+| `True` | Guarantees every Qwen vision and visual-reference block. | Maximum reference protection, similar to the broad legacy behaviour. |
 
-### Why this node exists
+When `Manual` is selected, the node reveals `Reference Sparsity Ratio`:
 
-Default ComfyUI workflows often suffer from:
+- `0.80` skips 80% and guarantees the best-scoring 20% of each reference
+  range per query;
+- `0.90` skips 90% and guarantees the best-scoring 10%;
+- `0.00` guarantees all reference blocks;
+- setting it equal to the main `sparsity_ratio` gives references the same
+  nominal keep percentage as global sparse attention.
 
-* mask stretching inconsistencies
-* image/mask misalignment after resize
-* inconsistent crop behavior between pipelines
+The manual reference quota is additive. Guaranteed reference blocks are added
+on top of normal global top-k, so enabling the quota does not evict video
+blocks that SLA would otherwise select. Consequently, stronger reference
+protection increases attention work and may reduce the speed gain.
 
-This node ensures both image and mask follow identical geometric transformations for predictable inpainting and compositing results.
+The numeric reference-sparsity control is used only in `Manual` mode and is
+hidden in the ComfyUI node for `Off` and `True`.
 
-### Node
+## Suggested starting points
 
-**Unified Resize Image / Mask (Clean)**
-Category: image
+- No visual reference or maximum speed: `Off`.
+- Reference image/video with a cautious speed compromise: `Manual`, `0.80`.
+- Lighter protection: `Manual`, `0.90`.
+- A/B comparison against broad prefix protection: `True`.
 
----
-
-# Visual Crop + Resize (BBox)
- 
-Visual, drag-to-crop tools with aspect-ratio locking, available as a standalone crop node or combined with the resize pipeline in a single node.
-
- <img width="256" height="256" alt="Screenshot_20260806_001136" src="https://github.com/user-attachments/assets/753640d8-a821-4614-8665-1752bc1b2cd6" />
-
-### Features
- 
-* Interactive drag-and-resize crop box overlay, drawn directly on the node
-* Corner-handle resizing with aspect-ratio lock:
-  * Free
-  * 1:1, 4:3, 3:4, 16:9, 9:16, 21:9, 3:2, 2:3
-  * Custom (numeric ratio)
-* Normalized crop coordinates (0–1), so the box holds its relative position if the source resolution changes
-* Optional numeric override of the crop box, hideable via a single toggle
-* Outputs the crop origin (`x`, `y`) in source-pixel space for compositing the result back onto the original image
-* Combined node chains the crop straight into the same scaling modes, divisible-by constraint, and post-scale center crop as Unified Resize
-### Why these nodes exist
- 
-Cropping to a specific region or aspect ratio in ComfyUI normally means eyeballing pixel math or reaching for external tools. These nodes let a crop be drawn directly on the node after a single run, then reused and fine-tuned in place.
- 
-### Nodes
- 
-**Visual Crop (BBox)**
-Category: image
-Crop only, no resize. Outputs the cropped image/mask plus width, height, x, y.
- 
-**Visual Crop + Resize (BBox)**
-Category: image
-Crop followed by the full Unified Resize pipeline in one node.
- 
----
-
-# LTX LoRA Loader Stack (PlagueKind)
-
-A 10-slot LoRA stacking node designed for LTX-2.3 workflows, featuring independent video and audio branch strength control per LoRA, optional CLIP passthrough, and structured stacking for advanced diffusion pipelines. This node also works as a standard LoRA loader for any compatible model, and supports MiniMax H3 with per-modality strength controls.
-
-<img width="256" height="171" alt="Screenshot_20260529_184720" src="https://github.com/user-attachments/assets/ed7e8083-8f1c-4b1e-89fb-8f60f2025f34" />
-
-
-### Features
-
-* Up to 10 stacked LoRA slots
-* Per-slot enable / disable control
-* Independent strength system:
-
-  * S = master LoRA strength
-  * V = video branch multiplier
-  * A = audio branch multiplier
-* Effective strengths:
-
-  * Video = S × V
-  * Audio = S × A
-* Works as a standard LoRA loader for general models
-* Top-level mode toggle (normal / ltx / minimax) with auto-detection via LoRA key-name sniffing
-* LoRA folder browser with search + nested directory support
-* Missing LoRA detection warning
-* Drag-and-drop slot reordering
-* Optional CLIP input passthrough
-* JSON-based stack serialization inside ComfyUI workflows
-
-### Why this node exists
-
-LTX-2.3 separates transformer processing into distinct audio and video branches, but most LoRA loaders treat all weights uniformly.
-
-This node solves that limitation by allowing:
-
-* targeted modulation of audio vs visual influence
-* per-slot stacking instead of single LoRA application
-* structured control over multi-LoRA compositions
-
-### Node
-
-**LoRA Loader Stack ( LTX Compatible )**
-Category: PlagueKind/loaders
-
----
-
-# H3 SLA Attention
-
-Block-sparse attention for MiniMax-H3.
-
-### Features
-
-* `sparsity_ratio` — fraction of key blocks skipped (default 0.90). 0.85 is lightx2v's shipped value; 0.90 measured ~15% faster. Below ~0.60 the kernel is slower than dense, so it's a real floor, not a safe fallback.
-* `block_size` (64 / 128) — how many sequence tokens share one key selection. Matters far more for audio than video: 128 forces 1.6 s of audio down one attention pattern and speech comes out robotic; 64 is clean for ~2% more time.
-* `min_seq_len` — sequences shorter than this stay dense, protecting the short text-refiner attention and short/low-res clips where sparsity would cost more than it saves.
-* `dense_last_steps` — run the final N sampling steps at full attention to recover fine detail, since the last step's error is the one you actually see.
-* `protect_audio` — always attends language-token, target-audio, and audio-reference blocks regardless of top-k, while excluding Qwen vision tokens and large visual-reference spans. Audio is only ~1% of the packed sequence and plain top-k can drop it entirely.
-* `enabled` — bypass toggle for a like-for-like dense speed baseline without rewiring the graph.
-* Follows ComfyUI's actual `WrapperExecutor` chain and derives its position in the sampler from `sample_sigmas`/`sigmas` rather than counting model invocations, so it stays correctly synced and composes cleanly with step-caching/forecasting accelerators (e.g. Spectrum) that skip some denoiser evaluations.
-* Automatic dense fallback if Triton is missing, the GPU is unsupported, or the ComfyUI attention API changes — a broken patch never blocks a run, it just runs dense.
-
-Measured end-to-end on a 5090 at 768p/15s with the SLA turbo LoRA: ~44 s/it dense vs. ~31 s/it at sparsity 0.85 and ~25 s/it at 0.90 (1.4–1.75x), with no extra VRAM. Attention is only ~30 s of that 44 s step, so the ceiling is ~3.17x however fast attention itself gets — the widely-quoted 2.5x is an eight-GPU number. Sparsity did not turn out to drive H3 speech artifacts; step count did, so prefer 6+ sampling steps over lowering `sparsity_ratio`.
-
-### Node
-
-**H3 SLA Attention**
-Category: PlagueKind/model_patches/minimax
-
----
-
-# H3 AdaLN LoRA Fix
-
-Makes dense (full-base) MiniMax-H3 LoRAs — including turbo LoRAs — work on pruned / curve-form H3 checkpoints, instead of being silently skipped with 51 `ERROR lora ... adaln_proj` lines per model load. Drop it on the MODEL wire anywhere after your LoRA loader(s) — rgthree's Power Lora Loader, ComfyUI's own, any stack. It operates on the patches those loaders already attached, so it needs no knowledge of which LoRAs were chosen and nothing upstream has to change.
-
-### Why this node exists
-
-A pruned checkpoint stores its AdaLN (timestep-modulation) projections over an 8-wide curve basis instead of the dense 2688-wide time embedding used by full H3 LoRAs. Without this fix, ComfyUI can't reconcile the shapes, logs one `ERROR` line per incompatible key, and drops all 51 — including on H3 turbo LoRAs, which is where this most commonly shows up. This node rebases those weights onto whichever basis the target model actually uses, so they apply instead of being dropped, and works in both directions (dense LoRA → pruned base, or curve-form LoRA → full base).
-
-Measured on real H3 turbo LoRAs, the restored contribution is only ~0.02% of the modulation signal — so the practical benefit is a clean log, not a visible quality change.
-
-### Features
-
-* `mode`:
-  * `port` — rebase the AdaLN weights onto the basis the model actually uses. Quiet log, timestep modulation restored.
-  * `strip` — drop the incompatible weights. Quiet log, output identical to having no fix at all.
-  * `off` — passthrough, leaves the errors in place.
-* Fails safe: if the rebase itself errors, the unfixed model still runs and generates — it just logs the same errors it would have without the node.
-
-### Node
-
-**H3 AdaLN LoRA Fix**
-Category: PlagueKind/model_patches/minimax
-
----
+These modes are experimental. Reference adherence, identity, motion, speech,
+and audio/video synchronization should be compared with identical seeds and
+settings before choosing a default for production workflows.
 
 ## Installation
 
-### Manual install
+First remove or move the original repository out of `custom_nodes`. Then:
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/PlagueKind/ComfyUI-PlagueKind-Nodes.git
+git clone https://github.com/lukas-9936/ComfyUI-PlagueKind-Nodes_experimental.git
 ```
 
-### ComfyUI Manager
+Restart ComfyUI. If updating an existing installation, pull the latest `main`
+and refresh ComfyUI's frontend/node definitions so the conditional Manual
+slider script is reloaded.
 
-This node is also available via **ComfyUI Manager** for one-click installation.
+## Compatibility and requirements
 
-Restart ComfyUI.
+- Based on PlagueKind v1.3.8.
+- Requires the same dependencies as the upstream node pack.
+- H3 SLA Attention requires Triton and a supported GPU; unsupported setups
+  fall back safely as in upstream.
+- Existing workflows remain compatible because the new controls were appended
+  to the node inputs and default to `Off`.
 
----
+## Upstream and license
 
-## Requirements
+All original node-pack work belongs to the upstream project and its
+contributors. See
+[PlagueKind/ComfyUI-PlagueKind-Nodes](https://github.com/PlagueKind/ComfyUI-PlagueKind-Nodes)
+for the original documentation and project history.
 
-No external dependencies required beyond standard ComfyUI installation.
-
-Uses:
-
-* torch
-* comfy.utils
-* comfy.lora
-
-H3 SLA Attention additionally requires Triton and a supported GPU; if either is missing, the node logs a warning and the pack loads without it rather than blocking ComfyUI startup.
-
----
-
-## License
-
-MIT License
-
----
-
-## Support
-
-If you find this project useful and want to support development:
-
-Monero (XMR):
-`865BrcfWLdwELwuq5faV1uVTbh93zVK6AUYLY2c3mX6sFfAGRfS6axe1kBTYYKuM7ccN7zBZDAZvnT7E4NKmUazySdbpc7p`
-
-Thank you for your support.
+This fork remains under the repository's MIT License.
