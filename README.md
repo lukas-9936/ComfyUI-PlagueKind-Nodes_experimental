@@ -105,4 +105,6 @@ contributors. See
 [PlagueKind/ComfyUI-PlagueKind-Nodes](https://github.com/PlagueKind/ComfyUI-PlagueKind-Nodes)
 for the original documentation and project history.
 
+THIS IS NOT A PERMANENTLY MAINTAINED FORK, IT IS ONLY FOR TESTING A QUICKER AUDIO IMPLEMENTATION!
+
 This fork remains under the repository's MIT License.
