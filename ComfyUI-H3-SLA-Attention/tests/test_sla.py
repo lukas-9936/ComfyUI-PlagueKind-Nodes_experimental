@@ -239,6 +239,25 @@ class StepWrapper(unittest.TestCase):
 @unittest.skipUnless(CUDA, "needs CUDA and triton")
 class Kernel(unittest.TestCase):
 
+    def test_motion_history_excludes_nonvideo_query_rows(self):
+        """Text/audio queries must not inherit motion choices between steps."""
+        from h3u.sla.block_map import get_block_map
+
+        S = 4096
+        video_start = 1024
+        torch.manual_seed(0)
+        q = torch.randn(1, S, H, D, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(1, S, H, D, device="cuda", dtype=torch.bfloat16)
+        lut, _, history = get_block_map(
+            q, k, 0.15, 64, 64, return_history=True,
+            stabilize_query_from=video_start,
+        )
+
+        first_video_query = (video_start + 63) // 64
+        self.assertEqual(
+            history.shape[-2], lut.shape[-2] - first_video_query
+        )
+
     def test_zero_sparsity_matches_dense_attention(self):
         """With every block kept, the sparse kernel is just attention."""
         from h3u.sla.block_map import get_block_map

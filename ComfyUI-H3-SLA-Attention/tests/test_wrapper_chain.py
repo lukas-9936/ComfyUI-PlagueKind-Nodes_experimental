@@ -84,7 +84,7 @@ class WrapperExecutor:
 
 
 class WrapperChainRegression(unittest.TestCase):
-    def test_audio_range_is_read_without_pinning_reference_segments(self):
+    def test_language_and_audio_ranges_exclude_visual_reference_segments(self):
         state = sla_patch._new_state()
         sla_wrapper = sla_patch._make_wrapper(state, 0.90, 64, 64, 0)
         seen = {}
@@ -92,9 +92,10 @@ class WrapperChainRegression(unittest.TestCase):
         class Layout:
             segments = [
                 (0, 512, "text"),
-                (512, 8192, "cond"),
-                (8192, 10192, "audio"),
-                (10192, 120000, "video"),
+                (512, 8192, "ref_img"),
+                (8192, 9192, "ref_audio"),
+                (9192, 11192, "audio"),
+                (11192, 120000, "video"),
             ]
 
         def downstream(executor, *args, **kwargs):
@@ -107,11 +108,18 @@ class WrapperChainRegression(unittest.TestCase):
         executor.execute(
             object(), object(), object(),
             transformer_options={"sample_sigmas": [1.0, 0.0]},
-            minimax_payload={"layout": Layout()},
+            minimax_payload={
+                "layout": Layout(),
+                "text_token_tags": [1] * 64 + [0] * 416 + [1] * 32,
+            },
         )
 
-        self.assertEqual(seen["_h3sla_protected_ranges"], ((8192, 10192),))
-        self.assertEqual(seen["_h3sla_prefix"], 10192)
+        self.assertEqual(
+            seen["_h3sla_protected_ranges"],
+            ((0, 64), (480, 512), (8192, 9192), (9192, 11192)),
+        )
+        self.assertEqual(seen["_h3sla_prefix"], 11192)
+        self.assertEqual(seen["_h3sla_stabilize_query_from"], 11192)
 
     def test_sla_advances_to_downstream_wrapper_before_original(self):
         events = []

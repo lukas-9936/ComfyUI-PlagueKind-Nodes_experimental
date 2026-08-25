@@ -133,7 +133,8 @@ def get_protected_block_ranges(protect_upto, protect_ranges, BLKK, NK):
 
 
 def get_block_map(q, k, topk_ratio, BLKQ=128, BLKK=128, protect_upto=0,
-                  prev_lut=None, protect_ranges=None, return_history=False):
+                  prev_lut=None, protect_ranges=None, return_history=False,
+                  stabilize_query_from=0):
     """Return ``(lut, topk)``: the key blocks each query block should attend to.
 
     ``q``/``k`` are ``(B, L, H, D)`` contiguous. ``lut`` comes back as
@@ -148,9 +149,8 @@ def get_block_map(q, k, topk_ratio, BLKQ=128, BLKK=128, protect_upto=0,
     coverage is unchanged and the extra cost is the prefix itself (~7%).
 
     ``protect_ranges`` provides the same guarantee for specific half-open token
-    spans. H3 uses it to protect only audio instead of treating the complete
-    ``[text | cond/ref | audio]`` prefix as audio. It is merged with
-    ``protect_upto`` when both are supplied.
+    spans. H3 uses it for language and audio while excluding large visual-
+    reference spans. It is merged with ``protect_upto`` when both are supplied.
 
     ``prev_lut``, when given the previous call's ``lut`` for this same layer,
     nudges those blocks' scores up before top-k -- pure per-step top-k has no
@@ -160,7 +160,8 @@ def get_block_map(q, k, topk_ratio, BLKQ=128, BLKK=128, protect_upto=0,
     pick. The nudge only breaks a close call; a block that's actually a
     better fit this step still wins. Silently ignored if its shape doesn't
     match this call's (e.g. right after a dense step, or the first sparse
-    call of a run).
+    call of a run). ``stabilize_query_from`` is a token offset; query blocks
+    before the target-video region are neither retained nor biased.
     """
     pooled_q = mean_pool(q, BLKQ)
     # Smooth-k (SageAttention's trick), folded in rather than materialised.
@@ -175,14 +176,20 @@ def get_block_map(q, k, topk_ratio, BLKQ=128, BLKK=128, protect_upto=0,
 
     pooled_score = pooled_q @ pooled_k.transpose(-1, -2)      # (B, H, NQ, NK)
 
+    NQ = pooled_score.shape[-2]
+    sticky_q_start = min(
+        NQ,
+        (max(0, int(stabilize_query_from)) + BLKQ - 1) // BLKQ,
+    )
+    sticky_score = pooled_score[..., sticky_q_start:, :]
     if (
         prev_lut is not None
-        and prev_lut.shape[:3] == pooled_score.shape[:3]
+        and prev_lut.shape[:3] == sticky_score.shape[:3]
         and prev_lut.shape[-1] <= pooled_score.shape[-1]
     ):
-        row_scale = pooled_score.detach().abs().amax(dim=-1, keepdim=True).clamp(min=1e-6)
+        row_scale = sticky_score.detach().abs().amax(dim=-1, keepdim=True).clamp(min=1e-6)
         bonus = (row_scale * _STICKY_BONUS_FRAC).expand(*prev_lut.shape)
-        pooled_score.scatter_add_(-1, prev_lut.long(), bonus)
+        sticky_score.scatter_add_(-1, prev_lut.long(), bonus)
 
     NK = pooled_score.shape[-1]
     # FIX vs upstream: keep at least one key block.
@@ -211,13 +218,15 @@ def get_block_map(q, k, topk_ratio, BLKQ=128, BLKK=128, protect_upto=0,
     # entries nearest the cutoff -- the only ones that can plausibly flip.
     # Strong selections do not need a sticky bonus, so dropping them from
     # the retained history costs nothing but the VRAM they were sitting on.
+    history_indices = lut[..., sticky_q_start:, :]
+    history_values = selected.values[..., sticky_q_start:, :]
     history_width = min(_STICKY_HISTORY_WIDTH, topk)
     if history_width == topk:
-        history = lut
+        history = history_indices
     else:
         boundary_pos = torch.topk(
-            selected.values, history_width, dim=-1, largest=False, sorted=False
+            history_values, history_width, dim=-1, largest=False, sorted=False
         ).indices
-        history = torch.gather(lut, -1, boundary_pos)
+        history = torch.gather(history_indices, -1, boundary_pos)
 
     return lut_i32, topk, history.to(torch.int32).contiguous()

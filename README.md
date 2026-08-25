@@ -135,7 +135,7 @@ Block-sparse attention for MiniMax-H3.
 * `block_size` (64 / 128) — how many sequence tokens share one key selection. Matters far more for audio than video: 128 forces 1.6 s of audio down one attention pattern and speech comes out robotic; 64 is clean for ~2% more time.
 * `min_seq_len` — sequences shorter than this stay dense, protecting the short text-refiner attention and short/low-res clips where sparsity would cost more than it saves.
 * `dense_last_steps` — run the final N sampling steps at full attention to recover fine detail, since the last step's error is the one you actually see.
-* `protect_audio` — always attends the [text | cond | audio] prefix regardless of top-k, since audio is only ~1% of the packed sequence and plain top-k can drop it entirely. Costs ~7%.
+* `protect_audio` — always attends language-token, target-audio, and audio-reference blocks regardless of top-k, while excluding Qwen vision tokens and large visual-reference spans. Audio is only ~1% of the packed sequence and plain top-k can drop it entirely.
 * `enabled` — bypass toggle for a like-for-like dense speed baseline without rewiring the graph.
 * Follows ComfyUI's actual `WrapperExecutor` chain and derives its position in the sampler from `sample_sigmas`/`sigmas` rather than counting model invocations, so it stays correctly synced and composes cleanly with step-caching/forecasting accelerators (e.g. Spectrum) that skip some denoiser evaluations.
 * Automatic dense fallback if Triton is missing, the GPU is unsupported, or the ComfyUI attention API changes — a broken patch never blocks a run, it just runs dense.

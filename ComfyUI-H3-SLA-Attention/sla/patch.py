@@ -290,9 +290,9 @@ def _make_override(state, sparsity_ratio, blkq, blkk, min_seq_len,
     is set globally; the sparse path is unaffected either way, since it
     never calls ``func`` at all.
 
-    ``stabilize_motion`` carries each layer's previously-selected key blocks
-    into ``get_block_map`` as a tie-breaker (see block_map.py); it costs one
-    small dict lookup and store per call, nothing else. ``state["call_idx"]``
+    ``stabilize_motion`` carries each layer's near-cutoff target-video choices
+    into ``get_block_map`` as a tie-breaker (see block_map.py). Text and audio
+    query routing remains step-local. ``state["call_idx"]``
     is the layer identity this relies on -- it counts calls within the
     current step, reset to 0 by the wrapper at the top of every step, and it
     works because the model graph is static: the Nth attention call happens
@@ -342,10 +342,10 @@ def _make_override(state, sparsity_ratio, blkq, blkk, min_seq_len,
             if not qb.is_contiguous():
                 qb, kb, vb = qb.contiguous(), kb.contiguous(), vb.contiguous()
 
-            # Pin audio into every query's selection. New wrappers provide its
-            # precise token ranges so reference images are not accidentally
-            # force-selected too. The prefix value is a compatibility fallback
-            # for transformer_options produced by older wrappers.
+            # Pin language and audio into every query's selection. New wrappers
+            # provide precise token ranges so Qwen vision and visual-reference
+            # rows are not force-selected too. The prefix is a compatibility
+            # fallback for transformer_options produced by older wrappers.
             protected_ranges = None
             prefix = 0
             if protect_audio:
@@ -354,6 +354,9 @@ def _make_override(state, sparsity_ratio, blkq, blkk, min_seq_len,
                     prefix = int(to.get("_h3sla_prefix", 0) or 0)
             if prefix >= S:
                 prefix = 0
+            stabilize_query_from = int(
+                to.get("_h3sla_stabilize_query_from", 0) or 0
+            )
 
             call_idx = state["call_idx"]
             state["call_idx"] = call_idx + 1
@@ -364,6 +367,7 @@ def _make_override(state, sparsity_ratio, blkq, blkk, min_seq_len,
                     qb, kb, topk_ratio, blkq, blkk,
                     protect_upto=prefix, prev_lut=prev_lut,
                     protect_ranges=protected_ranges, return_history=True,
+                    stabilize_query_from=stabilize_query_from,
                 )
                 # Only the bounded boundary slice is retained -- see
                 # block_map.py. Storing the full lut here is what made this
@@ -423,6 +427,40 @@ def _sequence_scalar(value):
             return None
         return float(value[0])
     return None
+
+
+def _language_token_ranges(start, stop, text_token_tags):
+    """Return contiguous language-only spans inside H3's presentation rows."""
+    if text_token_tags is None:
+        return ((int(start), int(stop)),)
+    try:
+        if hasattr(text_token_tags, "reshape"):
+            tags = text_token_tags.reshape(-1).tolist()
+        else:
+            tags = list(text_token_tags)
+    except (AttributeError, TypeError, ValueError):
+        return ((int(start), int(stop)),)
+
+    expected = int(stop) - int(start)
+    if len(tags) != expected:
+        return ((int(start), int(stop)),)
+    try:
+        tags = [int(tag) for tag in tags]
+    except (TypeError, ValueError):
+        return ((int(start), int(stop)),)
+
+    ranges = []
+    run_start = None
+    for offset, tag in enumerate(tags):
+        is_language = tag == 1
+        if is_language and run_start is None:
+            run_start = offset
+        elif not is_language and run_start is not None:
+            ranges.append((int(start) + run_start, int(start) + offset))
+            run_start = None
+    if run_start is not None:
+        ranges.append((int(start) + run_start, int(stop)))
+    return tuple(ranges)
 
 
 def _resolve_sampler_step(transformer_options):
@@ -569,23 +607,31 @@ def _make_wrapper(state, sparsity_ratio, blkq, blkk, dense_last_steps,
             # reduced-precision reduction path while this model is patched.
             _set_fp16_accum(False)
 
-        # PackedLayout.segments is [(start, stop, kind), ...] over
-        # [text | cond/ref | audio | video]. Preserve the historical prefix for
-        # compatibility and also pass precise audio spans so protect_audio no
-        # longer force-selects high-resolution reference-image tokens.
+        # Preserve the historical prefix for compatibility, but current H3
+        # payloads let us protect language/audio spans precisely while leaving
+        # Qwen vision and visual conditioning/reference rows sparse. Motion
+        # hysteresis begins only at the target-video segment.
         prefix = 0
-        audio_ranges = []
+        protected_ranges = []
         layout = minimax_payload.get("layout") if minimax_payload else None
+        text_token_tags = (
+            minimax_payload.get("text_token_tags") if minimax_payload else None
+        )
         for seg in getattr(layout, "segments", ()) or ():
             if len(seg) != 3:
                 continue
             start, stop, kind = seg
-            if kind == "audio":
-                audio_ranges.append((int(start), int(stop)))
+            if kind == "text":
+                protected_ranges.extend(
+                    _language_token_ranges(start, stop, text_token_tags)
+                )
+            elif kind in ("ref_audio", "audio"):
+                protected_ranges.append((int(start), int(stop)))
             elif kind == "video" and prefix == 0:
                 prefix = int(start)
         to["_h3sla_prefix"] = prefix
-        to["_h3sla_protected_ranges"] = tuple(audio_ranges)
+        to["_h3sla_protected_ranges"] = tuple(protected_ranges)
+        to["_h3sla_stabilize_query_from"] = prefix
 
         step0 = state["step"] - 1  # 0-based, for dense_steps membership
         to["_h3sla_dense"] = bool(
