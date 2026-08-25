@@ -84,9 +84,25 @@ class WrapperExecutor:
 
 
 class WrapperChainRegression(unittest.TestCase):
+    def test_reference_protection_modes_resolve_to_expected_sparsity(self):
+        self.assertEqual(
+            sla_patch._resolve_reference_sparsity("True", 0.80),
+            ("true", 0.0),
+        )
+        self.assertEqual(
+            sla_patch._resolve_reference_sparsity("Manual", 0.80),
+            ("manual", 0.80),
+        )
+        self.assertEqual(
+            sla_patch._resolve_reference_sparsity("Off", 0.80),
+            ("off", None),
+        )
+
     def test_language_and_audio_ranges_exclude_visual_reference_segments(self):
         state = sla_patch._new_state()
-        sla_wrapper = sla_patch._make_wrapper(state, 0.90, 64, 64, 0)
+        sla_wrapper = sla_patch._make_wrapper(
+            state, 0.90, 64, 64, 0, reference_quota_enabled=True
+        )
         seen = {}
 
         class Layout:
@@ -117,6 +133,10 @@ class WrapperChainRegression(unittest.TestCase):
         self.assertEqual(
             seen["_h3sla_protected_ranges"],
             ((0, 64), (480, 512), (8192, 9192), (9192, 11192)),
+        )
+        self.assertEqual(
+            seen["_h3sla_reference_ranges"],
+            ((64, 480), (512, 8192)),
         )
         self.assertEqual(seen["_h3sla_prefix"], 11192)
         self.assertEqual(seen["_h3sla_stabilize_query_from"], 11192)

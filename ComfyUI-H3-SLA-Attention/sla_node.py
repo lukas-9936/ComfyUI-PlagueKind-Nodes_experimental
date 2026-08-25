@@ -15,6 +15,7 @@ from comfy_api.latest import io
 log = logging.getLogger("H3Utils")
 
 BLOCK_SIZES = ("64", "128")
+REFERENCE_PROTECTION_MODES = ("True", "Manual", "Off")
 # Matches kijai/ComfyUI-KJNodes' PatchSageAttentionKJ mode list exactly (see
 # sla/patch.py for the per-mode kernel + pv_accum_dtype each one calls),
 # plus this node's own "pytorch" / "comfy_kitchen" / "auto" choices.
@@ -190,6 +191,28 @@ class H3SLAAttention(io.ComfyNode):
                         "query rows are stabilized; text and audio choices "
                         "remain step-local. It is a fix for that one specific "
                         "symptom, not a general quality dial.")),
+                io.Combo.Input("reference_protection",
+                    options=list(REFERENCE_PROTECTION_MODES), default="Off",
+                    optional=True,
+                    tooltip=(
+                        "Protect Video/Image Reference. True guarantees every "
+                        "Qwen vision and visual conditioning/reference block, "
+                        "matching the broad legacy prefix protection. Manual "
+                        "guarantees only the best-scoring fraction selected by "
+                        "reference_sparsity_ratio. Off adds no special quota; "
+                        "references still participate in ordinary top-k. "
+                        "Default Off preserves the precise audio patch's "
+                        "fastest behaviour.")),
+                io.Float.Input("reference_sparsity_ratio", default=0.80,
+                    min=0.0, max=0.99, step=0.05, round=False, optional=True,
+                    tooltip=(
+                        "Used only when Protect Video/Image Reference is "
+                        "Manual. Fraction of visual-reference blocks skipped "
+                        "inside their own guaranteed quota: 0.80 keeps the "
+                        "best 20%; 0.90 keeps 10%. Set it equal to the main "
+                        "sparsity_ratio for matching nominal sparsity. The "
+                        "quota is added on top of normal top-k so it never "
+                        "evicts ordinary video selections.")),
             ],
             outputs=[io.Model.Output()],
         )
@@ -198,7 +221,9 @@ class H3SLAAttention(io.ComfyNode):
     def execute(cls, model, sparsity_ratio=0.90, block_size="64",
                 min_seq_len=4096, dense_last_steps=1, protect_audio=True,
                 enabled=True, dense_steps="0", dense_backend="comfy_kitchen",
-                disable_fp16_accum=True, stabilize_motion=True) -> io.NodeOutput:
+                disable_fp16_accum=True, stabilize_motion=True,
+                reference_protection="Off",
+                reference_sparsity_ratio=0.80) -> io.NodeOutput:
         if not enabled:
             log.info("[H3Utils] SLA disabled; model passed through unchanged.")
             return io.NodeOutput(model)
@@ -216,6 +241,8 @@ class H3SLAAttention(io.ComfyNode):
                 disable_fp16_accum=disable_fp16_accum,
                 protect_audio=protect_audio,
                 stabilize_motion=stabilize_motion,
+                reference_protection=reference_protection,
+                reference_sparsity_ratio=reference_sparsity_ratio,
             )
         except Exception:                                # noqa: BLE001
             # Triton missing, an incompatible GPU, a ComfyUI API change -- none

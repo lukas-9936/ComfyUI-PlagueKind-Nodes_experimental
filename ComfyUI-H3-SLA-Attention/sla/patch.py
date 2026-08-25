@@ -279,7 +279,8 @@ def _summarise(state, sparsity, blkq, blkk):
 
 
 def _make_override(state, sparsity_ratio, blkq, blkk, min_seq_len,
-                   protect_audio=True, dense_fn=None, stabilize_motion=False):
+                   protect_audio=True, dense_fn=None, stabilize_motion=False,
+                   reference_sparsity=None):
     """``dense_fn``, when not None, is a specific backend (e.g. always
     ``attention_pytorch``) that every dense fall-through uses instead of
     ``func``. Without it, ``func`` is whatever ``optimized_attention``
@@ -357,6 +358,7 @@ def _make_override(state, sparsity_ratio, blkq, blkk, min_seq_len,
             stabilize_query_from = int(
                 to.get("_h3sla_stabilize_query_from", 0) or 0
             )
+            reference_ranges = to.get("_h3sla_reference_ranges")
 
             call_idx = state["call_idx"]
             state["call_idx"] = call_idx + 1
@@ -368,6 +370,8 @@ def _make_override(state, sparsity_ratio, blkq, blkk, min_seq_len,
                     protect_upto=prefix, prev_lut=prev_lut,
                     protect_ranges=protected_ranges, return_history=True,
                     stabilize_query_from=stabilize_query_from,
+                    reference_ranges=reference_ranges,
+                    reference_sparsity=reference_sparsity,
                 )
                 # Only the bounded boundary slice is retained -- see
                 # block_map.py. Storing the full lut here is what made this
@@ -378,6 +382,8 @@ def _make_override(state, sparsity_ratio, blkq, blkk, min_seq_len,
                     qb, kb, topk_ratio, blkq, blkk,
                     protect_upto=prefix, prev_lut=prev_lut,
                     protect_ranges=protected_ranges,
+                    reference_ranges=reference_ranges,
+                    reference_sparsity=reference_sparsity,
                 )
             out = block_sparse_attention(qb, kb, vb, lut, topk, blkq, blkk)
 
@@ -429,38 +435,60 @@ def _sequence_scalar(value):
     return None
 
 
-def _language_token_ranges(start, stop, text_token_tags):
-    """Return contiguous language-only spans inside H3's presentation rows."""
+def _tagged_text_ranges(start, stop, text_token_tags, wanted_tag, fallback):
+    """Return contiguous spans for one H3 presentation-token tag."""
     if text_token_tags is None:
-        return ((int(start), int(stop)),)
+        return fallback
     try:
         if hasattr(text_token_tags, "reshape"):
             tags = text_token_tags.reshape(-1).tolist()
         else:
             tags = list(text_token_tags)
     except (AttributeError, TypeError, ValueError):
-        return ((int(start), int(stop)),)
+        return fallback
 
     expected = int(stop) - int(start)
     if len(tags) != expected:
-        return ((int(start), int(stop)),)
+        return fallback
     try:
         tags = [int(tag) for tag in tags]
     except (TypeError, ValueError):
-        return ((int(start), int(stop)),)
+        return fallback
 
     ranges = []
     run_start = None
     for offset, tag in enumerate(tags):
-        is_language = tag == 1
-        if is_language and run_start is None:
+        is_wanted = tag == wanted_tag
+        if is_wanted and run_start is None:
             run_start = offset
-        elif not is_language and run_start is not None:
+        elif not is_wanted and run_start is not None:
             ranges.append((int(start) + run_start, int(start) + offset))
             run_start = None
     if run_start is not None:
         ranges.append((int(start) + run_start, int(stop)))
     return tuple(ranges)
+
+
+def _language_token_ranges(start, stop, text_token_tags):
+    """Return language spans, safely falling back to the whole text segment."""
+    return _tagged_text_ranges(
+        start, stop, text_token_tags, 1, ((int(start), int(stop)),)
+    )
+
+
+def _vision_token_ranges(start, stop, text_token_tags):
+    """Return Qwen vision spans; missing tags mean no optional reference quota."""
+    return _tagged_text_ranges(start, stop, text_token_tags, 0, ())
+
+
+def _resolve_reference_sparsity(reference_protection, manual_ratio):
+    """Return ``(mode, sparsity)``; ``None`` sparsity means quota disabled."""
+    mode = str(reference_protection).strip().lower()
+    if mode == "true":
+        return mode, 0.0
+    if mode == "manual":
+        return mode, max(0.0, min(0.99, float(manual_ratio)))
+    return "off", None
 
 
 def _resolve_sampler_step(transformer_options):
@@ -569,7 +597,8 @@ def _set_fp16_accum(enabled):
 
 
 def _make_wrapper(state, sparsity_ratio, blkq, blkk, dense_last_steps,
-                  dense_steps=frozenset(), disable_fp16_accum=False):
+                  dense_steps=frozenset(), disable_fp16_accum=False,
+                  reference_quota_enabled=False):
     """DIFFUSION_MODEL wrapper: per-step state, and the end-of-run summary.
 
     Registered once and then reused -- ComfyUI caches node outputs, so this
@@ -613,6 +642,7 @@ def _make_wrapper(state, sparsity_ratio, blkq, blkk, dense_last_steps,
         # hysteresis begins only at the target-video segment.
         prefix = 0
         protected_ranges = []
+        reference_ranges = []
         layout = minimax_payload.get("layout") if minimax_payload else None
         text_token_tags = (
             minimax_payload.get("text_token_tags") if minimax_payload else None
@@ -625,12 +655,22 @@ def _make_wrapper(state, sparsity_ratio, blkq, blkk, dense_last_steps,
                 protected_ranges.extend(
                     _language_token_ranges(start, stop, text_token_tags)
                 )
+                if reference_quota_enabled:
+                    reference_ranges.extend(
+                        _vision_token_ranges(start, stop, text_token_tags)
+                    )
             elif kind in ("ref_audio", "audio"):
                 protected_ranges.append((int(start), int(stop)))
+            elif (
+                reference_quota_enabled
+                and kind in ("cond", "ref_img", "ref_video", "video_ref")
+            ):
+                reference_ranges.append((int(start), int(stop)))
             elif kind == "video" and prefix == 0:
                 prefix = int(start)
         to["_h3sla_prefix"] = prefix
         to["_h3sla_protected_ranges"] = tuple(protected_ranges)
+        to["_h3sla_reference_ranges"] = tuple(reference_ranges)
         to["_h3sla_stabilize_query_from"] = prefix
 
         step0 = state["step"] - 1  # 0-based, for dense_steps membership
@@ -692,7 +732,8 @@ def _make_wrapper(state, sparsity_ratio, blkq, blkk, dense_last_steps,
 
 def patch_h3_sla(model, sparsity_ratio=0.90, block_size=64, min_seq_len=8192,
                  dense_last_steps=0, protect_audio=True, dense_backend="comfy_kitchen",
-                 dense_steps="", disable_fp16_accum=True, stabilize_motion=False):
+                 dense_steps="", disable_fp16_accum=True, stabilize_motion=False,
+                 reference_protection="Off", reference_sparsity_ratio=0.80):
     """Return a clone of ``model`` whose H3 self-attention runs block-sparse.
 
     Weights are untouched; this only installs an attention override and a
@@ -720,6 +761,11 @@ def patch_h3_sla(model, sparsity_ratio=0.90, block_size=64, min_seq_len=8192,
     to actual content -- visible on fast motion as a faint double-exposure.
     Off by default: it's a real fix for that specific symptom, not a general
     quality dial, and adds a small amount of state to carry between steps.
+
+    ``reference_protection`` controls a separate visual-reference quota:
+    ``Off`` leaves references to global top-k, ``True`` guarantees all of
+    them, and ``Manual`` guarantees the best ``1-reference_sparsity_ratio``
+    fraction per reference range without displacing ordinary video choices.
     """
     blkq = int(block_size)
     # BLKK=64 is not a typo. On sm_120 the 128x128 tile needs 160 KB of shared
@@ -730,6 +776,9 @@ def patch_h3_sla(model, sparsity_ratio=0.90, block_size=64, min_seq_len=8192,
 
     dense_fn = _resolve_backend(dense_backend)
     dense_step_set = _parse_step_spec(dense_steps)
+    reference_mode, reference_sparsity = _resolve_reference_sparsity(
+        reference_protection, reference_sparsity_ratio
+    )
 
     state = _new_state()
     patched = model.clone()
@@ -738,22 +787,27 @@ def patch_h3_sla(model, sparsity_ratio=0.90, block_size=64, min_seq_len=8192,
     to["optimized_attention_override"] = _make_override(
         state, float(sparsity_ratio), blkq, blkk, int(min_seq_len),
         bool(protect_audio), dense_fn=dense_fn,
-        stabilize_motion=bool(stabilize_motion))
+        stabilize_motion=bool(stabilize_motion),
+        reference_sparsity=reference_sparsity)
     patched.model_options["transformer_options"] = to
 
     patched.add_wrapper_with_key(
         "diffusion_model", "h3_sla_state",
         _make_wrapper(state, float(sparsity_ratio), blkq, blkk,
                       int(dense_last_steps), dense_steps=dense_step_set,
-                      disable_fp16_accum=bool(disable_fp16_accum)),
+                      disable_fp16_accum=bool(disable_fp16_accum),
+                      reference_quota_enabled=reference_sparsity is not None),
     )
 
     log.info(
         "[H3Utils] SLA installed | sparsity=%.2f | BLK=%dx%d | min_seq_len=%d | "
         "dense_last_steps=%d | dense_steps=%s | dense_backend=%s | "
-        "protect_audio=%s | disable_fp16_accum=%s | stabilize_motion=%s",
+        "protect_audio=%s | reference_protection=%s%s | "
+        "disable_fp16_accum=%s | stabilize_motion=%s",
         sparsity_ratio, blkq, blkk, min_seq_len, dense_last_steps,
         sorted(dense_step_set) or "-", dense_backend, protect_audio,
+        reference_mode,
+        ("(%.2f)" % reference_sparsity) if reference_sparsity is not None else "",
         disable_fp16_accum, stabilize_motion,
     )
     return patched

@@ -239,6 +239,28 @@ class StepWrapper(unittest.TestCase):
 @unittest.skipUnless(CUDA, "needs CUDA and triton")
 class Kernel(unittest.TestCase):
 
+    def test_manual_reference_quota_guarantees_scored_reference_blocks(self):
+        from h3u.sla.block_map import get_block_map
+
+        S = 4096
+        reference = (512, 1536)  # 16 key blocks at BLKK=64
+        torch.manual_seed(0)
+        q = torch.randn(1, S, H, D, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(1, S, H, D, device="cuda", dtype=torch.bfloat16)
+
+        _, plain_topk = get_block_map(q, k, 0.10, 64, 64)
+        lut, topk = get_block_map(
+            q, k, 0.10, 64, 64,
+            reference_ranges=(reference,),
+            reference_sparsity=0.80,
+        )
+
+        # ceil(20% of 16) = 4, added without displacing the global top-k.
+        self.assertEqual(topk, plain_topk + 4)
+        first, last = reference[0] // 64, reference[1] // 64
+        reference_count = ((lut.long() >= first) & (lut.long() < last)).sum(-1)
+        self.assertTrue((reference_count >= 4).all())
+
     def test_motion_history_excludes_nonvideo_query_rows(self):
         """Text/audio queries must not inherit motion choices between steps."""
         from h3u.sla.block_map import get_block_map
