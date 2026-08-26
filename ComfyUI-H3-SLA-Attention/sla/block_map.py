@@ -251,7 +251,7 @@ def get_block_map(q, k, topk_ratio, BLKQ=128, BLKK=128, protect_upto=0,
     if reference_sparsity is not None:
         reference_sparsity = float(reference_sparsity)
         reference_blocks = get_reference_quota_block_ranges(
-            reference_ranges, protect_upto, protected_ranges, BLKK, NK
+            reference_ranges, protect_upto, protect_ranges, BLKK, NK
         )
         for first, last in reference_blocks:
             block_count = last - first

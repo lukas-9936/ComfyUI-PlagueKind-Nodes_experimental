@@ -84,18 +84,35 @@ class WrapperExecutor:
 
 
 class WrapperChainRegression(unittest.TestCase):
-    def test_reference_protection_modes_resolve_to_expected_sparsity(self):
+    def test_reference_modes_resolve_to_fixed_sparsity(self):
         self.assertEqual(
-            sla_patch._resolve_reference_sparsity("True", 0.80),
+            sla_patch._resolve_reference_sparsity("True"),
             ("true", 0.0),
         )
         self.assertEqual(
-            sla_patch._resolve_reference_sparsity("Manual", 0.80),
-            ("manual", 0.80),
+            sla_patch._resolve_reference_sparsity("Light"),
+            ("light", 0.85),
         )
         self.assertEqual(
-            sla_patch._resolve_reference_sparsity("Off", 0.80),
+            sla_patch._resolve_reference_sparsity("Off"),
             ("off", None),
+        )
+        # Experimental Manual workflows migrate to the audited fixed preset.
+        self.assertEqual(
+            sla_patch._resolve_reference_sparsity("Manual"),
+            ("light", 0.85),
+        )
+
+    def test_audio_protection_is_boolean_with_safe_string_migration(self):
+        self.assertTrue(sla_patch._resolve_audio_protection(True))
+        self.assertFalse(sla_patch._resolve_audio_protection(False))
+        self.assertTrue(sla_patch._resolve_audio_protection("True"))
+        self.assertFalse(sla_patch._resolve_audio_protection("Off"))
+        # A workflow saved while PR #1 exposed Manual becomes fully protected.
+        self.assertTrue(sla_patch._resolve_audio_protection("Manual"))
+        self.assertEqual(
+            sla_patch._resolve_audio_protection("false"),
+            False,
         )
 
     def test_language_and_audio_ranges_exclude_visual_reference_segments(self):

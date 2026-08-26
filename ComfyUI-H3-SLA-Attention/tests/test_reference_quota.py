@@ -43,6 +43,11 @@ block_map = _load_block_map_helpers()
 
 
 class ReferenceQuotaArithmetic(unittest.TestCase):
+    def test_block_map_uses_its_protect_ranges_argument(self):
+        code = block_map.get_block_map.__code__
+        self.assertIn("protect_ranges", code.co_varnames)
+        self.assertNotIn("protected_ranges", code.co_names)
+
     def test_reference_ranges_exclude_already_protected_blocks(self):
         ranges = block_map.get_reference_quota_block_ranges(
             reference_ranges=((64, 192), (256, 512)),

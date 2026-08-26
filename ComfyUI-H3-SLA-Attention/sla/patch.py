@@ -343,10 +343,9 @@ def _make_override(state, sparsity_ratio, blkq, blkk, min_seq_len,
             if not qb.is_contiguous():
                 qb, kb, vb = qb.contiguous(), kb.contiguous(), vb.contiguous()
 
-            # Pin language and audio into every query's selection. New wrappers
-            # provide precise token ranges so Qwen vision and visual-reference
-            # rows are not force-selected too. The prefix is a compatibility
-            # fallback for transformer_options produced by older wrappers.
+            # Audio/language protection is deliberately all-or-nothing: testing
+            # found partial audio quotas unstable for negligible speed benefit.
+            # Visual references retain their independent sparse quota.
             protected_ranges = None
             prefix = 0
             if protect_audio:
@@ -481,14 +480,29 @@ def _vision_token_ranges(start, stop, text_token_tags):
     return _tagged_text_ranges(start, stop, text_token_tags, 0, ())
 
 
-def _resolve_reference_sparsity(reference_protection, manual_ratio):
-    """Return ``(mode, sparsity)``; ``None`` sparsity means quota disabled."""
-    mode = str(reference_protection).strip().lower()
+REFERENCE_LIGHT_SPARSITY = 0.85
+
+
+def _resolve_reference_sparsity(reference_protection):
+    """Resolve True/Light/Off; old Manual workflows migrate to fixed Light."""
+    if reference_protection is True:
+        mode = "true"
+    elif reference_protection is False or reference_protection is None:
+        mode = "off"
+    else:
+        mode = str(reference_protection).strip().lower()
     if mode == "true":
         return mode, 0.0
-    if mode == "manual":
-        return mode, max(0.0, min(0.99, float(manual_ratio)))
+    if mode in ("light", "manual"):
+        return "light", REFERENCE_LIGHT_SPARSITY
     return "off", None
+
+
+def _resolve_audio_protection(protect_audio):
+    """Resolve the Boolean switch and safely read workflows saved during PR #1."""
+    if isinstance(protect_audio, str):
+        return protect_audio.strip().lower() not in ("off", "false", "0", "no")
+    return bool(protect_audio)
 
 
 def _resolve_sampler_step(transformer_options):
@@ -733,7 +747,7 @@ def _make_wrapper(state, sparsity_ratio, blkq, blkk, dense_last_steps,
 def patch_h3_sla(model, sparsity_ratio=0.90, block_size=64, min_seq_len=8192,
                  dense_last_steps=0, protect_audio=True, dense_backend="comfy_kitchen",
                  dense_steps="", disable_fp16_accum=True, stabilize_motion=False,
-                 reference_protection="Off", reference_sparsity_ratio=0.80):
+                 reference_protection="Off"):
     """Return a clone of ``model`` whose H3 self-attention runs block-sparse.
 
     Weights are untouched; this only installs an attention override and a
@@ -762,10 +776,13 @@ def patch_h3_sla(model, sparsity_ratio=0.90, block_size=64, min_seq_len=8192,
     Off by default: it's a real fix for that specific symptom, not a general
     quality dial, and adds a small amount of state to carry between steps.
 
+    ``protect_audio`` is an all-or-nothing safety switch for language,
+    reference-audio, and target-audio ranges.
+
     ``reference_protection`` controls a separate visual-reference quota:
-    ``Off`` leaves references to global top-k, ``True`` guarantees all of
-    them, and ``Manual`` guarantees the best ``1-reference_sparsity_ratio``
-    fraction per reference range without displacing ordinary video choices.
+    ``Off`` leaves references to global top-k, ``True`` guarantees all of them,
+    and ``Light`` guarantees the best 15% of every reference range without
+    displacing ordinary video choices.
     """
     blkq = int(block_size)
     # BLKK=64 is not a typo. On sm_120 the 128x128 tile needs 160 KB of shared
@@ -777,8 +794,9 @@ def patch_h3_sla(model, sparsity_ratio=0.90, block_size=64, min_seq_len=8192,
     dense_fn = _resolve_backend(dense_backend)
     dense_step_set = _parse_step_spec(dense_steps)
     reference_mode, reference_sparsity = _resolve_reference_sparsity(
-        reference_protection, reference_sparsity_ratio
+        reference_protection
     )
+    protect_audio = _resolve_audio_protection(protect_audio)
 
     state = _new_state()
     patched = model.clone()
@@ -786,7 +804,7 @@ def patch_h3_sla(model, sparsity_ratio=0.90, block_size=64, min_seq_len=8192,
     to = patched.model_options.get("transformer_options", {}).copy()
     to["optimized_attention_override"] = _make_override(
         state, float(sparsity_ratio), blkq, blkk, int(min_seq_len),
-        bool(protect_audio), dense_fn=dense_fn,
+        protect_audio=protect_audio, dense_fn=dense_fn,
         stabilize_motion=bool(stabilize_motion),
         reference_sparsity=reference_sparsity)
     patched.model_options["transformer_options"] = to
