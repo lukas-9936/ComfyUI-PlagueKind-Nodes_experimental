@@ -42,10 +42,15 @@ def _load_block_map_helpers():
 block_map = _load_block_map_helpers()
 
 
-class SparseQuotaArithmetic(unittest.TestCase):
+class ReferenceQuotaArithmetic(unittest.TestCase):
+    def test_block_map_uses_its_protect_ranges_argument(self):
+        code = block_map.get_block_map.__code__
+        self.assertIn("protect_ranges", code.co_varnames)
+        self.assertNotIn("protected_ranges", code.co_names)
+
     def test_reference_ranges_exclude_already_protected_blocks(self):
-        ranges = block_map.get_sparse_quota_block_ranges(
-            quota_ranges=((64, 192), (256, 512)),
+        ranges = block_map.get_reference_quota_block_ranges(
+            reference_ranges=((64, 192), (256, 512)),
             protect_upto=0,
             protected_ranges=((128, 320),),
             BLKK=64,
@@ -54,8 +59,8 @@ class SparseQuotaArithmetic(unittest.TestCase):
         self.assertEqual(ranges, ((1, 2), (5, 8)))
 
     def test_legacy_protected_prefix_is_also_subtracted(self):
-        ranges = block_map.get_sparse_quota_block_ranges(
-            quota_ranges=((0, 256),),
+        ranges = block_map.get_reference_quota_block_ranges(
+            reference_ranges=((0, 256),),
             protect_upto=128,
             protected_ranges=(),
             BLKK=64,
@@ -64,7 +69,7 @@ class SparseQuotaArithmetic(unittest.TestCase):
         self.assertEqual(ranges, ((2, 4),))
 
     def test_manual_sparsity_rounds_up_to_the_promised_minimum(self):
-        keep = block_map.get_sparse_quota_keep_count
+        keep = block_map.get_reference_quota_keep_count
         self.assertEqual(keep(10, 0.80), 2)
         self.assertEqual(keep(10, 0.90), 1)
         self.assertEqual(keep(3, 0.0), 3)

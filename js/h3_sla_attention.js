@@ -3,7 +3,7 @@ import { app } from "../../scripts/app.js";
 const NODE_TYPE = "H3SLAAttention";
 
 app.registerExtension({
-    name: "PlagueKind.H3SLAAttention.ProtectionModes",
+    name: "PlagueKind.H3SLAAttention.ReferenceProtection",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== NODE_TYPE) return;
 
@@ -12,55 +12,29 @@ app.registerExtension({
             const result = originalOnNodeCreated?.apply(this, arguments);
             const node = this;
 
-            function normalizeLegacyBoolean(widget) {
-                if (widget?.value === true) widget.value = "True";
-                if (widget?.value === false) widget.value = "Off";
-            }
-
-            function applyProtectionModes() {
+            function applyReferenceLabel() {
                 const referenceMode = node.widgets?.find(
                     widget => widget.name === "reference_protection"
                 );
-                const referenceRatio = node.widgets?.find(
-                    widget => widget.name === "reference_sparsity_ratio"
-                );
-                const audioMode = node.widgets?.find(
+                const protectAudio = node.widgets?.find(
                     widget => widget.name === "protect_audio"
                 );
-                const audioRatio = node.widgets?.find(
-                    widget => widget.name === "audio_sparsity_ratio"
-                );
-
-                normalizeLegacyBoolean(audioMode);
-
-                if (referenceMode && referenceRatio) {
-                    referenceMode.label = "Protect Video/Image Reference";
-                    referenceRatio.label = "Reference Sparsity Ratio";
-                    referenceRatio.hidden = referenceMode.value !== "Manual";
+                if (referenceMode) {
+                    referenceMode.label = "Protect Image/Video Reference";
+                    if (String(referenceMode.value).toLowerCase() === "manual") {
+                        referenceMode.value = "Light";
+                    }
                 }
-                if (audioMode && audioRatio) {
-                    audioMode.label = "Protect Audio / Language";
-                    audioRatio.label = "Audio Sparsity Ratio";
-                    audioRatio.hidden = audioMode.value !== "Manual";
+                if (protectAudio && typeof protectAudio.value === "string") {
+                    const disabled = ["off", "false", "0", "no"].includes(
+                        protectAudio.value.toLowerCase()
+                    );
+                    protectAudio.value = !disabled;
                 }
-
-                const computed = node.computeSize();
-                node.setSize([node.size[0], computed[1]]);
                 node.graph?.setDirtyCanvas(true, true);
             }
 
-            for (const name of ["reference_protection", "protect_audio"]) {
-                const mode = node.widgets?.find(widget => widget.name === name);
-                if (!mode) continue;
-                const originalCallback = mode.callback;
-                mode.callback = function (...args) {
-                    const callbackResult = originalCallback?.apply(this, args);
-                    applyProtectionModes();
-                    return callbackResult;
-                };
-            }
-
-            requestAnimationFrame(applyProtectionModes);
+            requestAnimationFrame(applyReferenceLabel);
             return result;
         };
     },
