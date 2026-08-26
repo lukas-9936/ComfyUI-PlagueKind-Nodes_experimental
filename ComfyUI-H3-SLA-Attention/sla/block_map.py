@@ -134,20 +134,20 @@ def get_protected_block_ranges(protect_upto, protect_ranges, BLKK, NK):
     return tuple(merged)
 
 
-def get_reference_quota_block_ranges(reference_ranges, protect_upto,
-                                     protected_ranges, BLKK, NK):
-    """Return reference block ranges excluding blocks already fully pinned.
+def get_sparse_quota_block_ranges(quota_ranges, protect_upto,
+                                  protected_ranges, BLKK, NK):
+    """Return quota block ranges excluding blocks already fully pinned.
 
-    Token spans are rounded out to key-block boundaries. Any overlap with the
-    language/audio protection is subtracted so the optional reference quota
-    never pays for, or counts, a block that is already guaranteed.
+    Token spans are rounded out to key-block boundaries. Any overlap with fully
+    protected ranges is subtracted so an optional sparse quota never pays for,
+    or counts, a block that is already guaranteed.
     """
-    references = get_protected_block_ranges(0, reference_ranges, BLKK, NK)
+    quota_blocks = get_protected_block_ranges(0, quota_ranges, BLKK, NK)
     protected = get_protected_block_ranges(
         protect_upto, protected_ranges, BLKK, NK
     )
     available = []
-    for first, last in references:
+    for first, last in quota_blocks:
         pieces = [(first, last)]
         for protected_first, protected_last in protected:
             next_pieces = []
@@ -164,16 +164,39 @@ def get_reference_quota_block_ranges(reference_ranges, protect_upto,
     return tuple(available)
 
 
-def get_reference_quota_keep_count(block_count, reference_sparsity):
-    """Translate reference sparsity into a guaranteed number of key blocks."""
-    if reference_sparsity is None or block_count <= 0:
+def get_sparse_quota_keep_count(block_count, quota_sparsity):
+    """Translate quota sparsity into a guaranteed number of key blocks."""
+    if quota_sparsity is None or block_count <= 0:
         return 0
-    sparsity = max(0.0, min(0.99, float(reference_sparsity)))
+    sparsity = max(0.0, min(0.99, float(quota_sparsity)))
     return max(1, min(block_count, math.ceil((1.0 - sparsity) * block_count)))
+
+
+def select_sparse_quota(pooled_score, quota_ranges, quota_sparsity,
+                        protect_upto, protected_ranges, BLKK, NK):
+    """Select additive per-range quota blocks without mutating the scores."""
+    if quota_sparsity is None:
+        return (), 0
+    selected = []
+    total = 0
+    for first, last in get_sparse_quota_block_ranges(
+        quota_ranges, protect_upto, protected_ranges, BLKK, NK
+    ):
+        keep = get_sparse_quota_keep_count(last - first, quota_sparsity)
+        if keep <= 0:
+            continue
+        selected.append(
+            torch.topk(
+                pooled_score[..., first:last], keep, dim=-1, sorted=False
+            ).indices + first
+        )
+        total += keep
+    return tuple(selected), total
 
 
 def get_block_map(q, k, topk_ratio, BLKQ=128, BLKK=128, protect_upto=0,
                   prev_lut=None, protect_ranges=None, return_history=False,
+                  audio_ranges=None, audio_sparsity=None,
                   stabilize_query_from=0, reference_ranges=None,
                   reference_sparsity=None):
     """Return ``(lut, topk)``: the key blocks each query block should attend to.
@@ -192,6 +215,11 @@ def get_block_map(q, k, topk_ratio, BLKQ=128, BLKK=128, protect_upto=0,
     ``protect_ranges`` provides the same guarantee for specific half-open token
     spans. H3 uses it for language and audio while excluding large visual-
     reference spans. It is merged with ``protect_upto`` when both are supplied.
+
+    ``audio_ranges`` plus a non-None ``audio_sparsity`` adds an independently
+    configurable language/audio quota. A value of 0.80 guarantees the best 20%
+    of each language, reference-audio, and target-audio range. ``None`` disables
+    the quota; fully protected audio is represented through ``protect_ranges``.
 
     ``reference_ranges`` plus a non-None ``reference_sparsity`` adds a second,
     segment-local selection tier for visual conditioning. For example, 0.80
@@ -247,32 +275,25 @@ def get_block_map(q, k, topk_ratio, BLKQ=128, BLKK=128, protect_upto=0,
         protect_upto, protect_ranges, BLKK, NK
     )
     n_pinned = sum(last - first for first, last in protected_blocks)
-    n_reference_quota = 0
-    if reference_sparsity is not None:
-        reference_sparsity = float(reference_sparsity)
-        reference_blocks = get_reference_quota_block_ranges(
-            reference_ranges, protect_upto, protected_ranges, BLKK, NK
-        )
-        for first, last in reference_blocks:
-            block_count = last - first
-            keep = get_reference_quota_keep_count(
-                block_count, reference_sparsity
-            )
-            if keep <= 0:
-                continue
-            selected_reference = torch.topk(
-                pooled_score[..., first:last], keep, dim=-1, sorted=False
-            ).indices + first
-            pooled_score.scatter_(-1, selected_reference, float("inf"))
-            n_reference_quota += keep
+    selected_audio, n_audio_quota = select_sparse_quota(
+        pooled_score, audio_ranges, audio_sparsity,
+        protect_upto, protect_ranges, BLKK, NK,
+    )
+    selected_reference, n_reference_quota = select_sparse_quota(
+        pooled_score, reference_ranges, reference_sparsity,
+        protect_upto, protect_ranges, BLKK, NK,
+    )
+    for quota_selection in (*selected_audio, *selected_reference):
+        pooled_score.scatter_(-1, quota_selection, float("inf"))
 
     # Ranking protected blocks above everything else is what pins them;
     # widening topk by the same amount stops them evicting the blocks that the
     # ordinary top-k selection would otherwise keep.
     for first, last in protected_blocks:
         pooled_score[..., first:last] = float("inf")
-    if n_pinned > 0 or n_reference_quota > 0:
-        topk = min(NK, topk + n_pinned + n_reference_quota)
+    n_quota = n_audio_quota + n_reference_quota
+    if n_pinned > 0 or n_quota > 0:
+        topk = min(NK, topk + n_pinned + n_quota)
 
     selected = torch.topk(pooled_score, topk, dim=-1, sorted=False)
     lut = selected.indices

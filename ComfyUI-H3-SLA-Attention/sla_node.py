@@ -15,7 +15,7 @@ from comfy_api.latest import io
 log = logging.getLogger("H3Utils")
 
 BLOCK_SIZES = ("64", "128")
-REFERENCE_PROTECTION_MODES = ("True", "Manual", "Off")
+PROTECTION_MODES = ("True", "Manual", "Off")
 # Matches kijai/ComfyUI-KJNodes' PatchSageAttentionKJ mode list exactly (see
 # sla/patch.py for the per-mode kernel + pv_accum_dtype each one calls),
 # plus this node's own "pytorch" / "comfy_kitchen" / "auto" choices.
@@ -108,19 +108,16 @@ class H3SLAAttention(io.ComfyNode):
                         "can recover fine detail, since the final step's error "
                         "is the one you actually see. Stacks with dense_steps "
                         "below rather than replacing it.")),
-                io.Boolean.Input("protect_audio", default=True,
-                    label_on="protect", label_off="uniform (lightx2v parity)",
+                io.Combo.Input("protect_audio", options=list(PROTECTION_MODES),
+                    default="True",
                     optional=True,
                     tooltip=(
-                        "Always attend blocks overlapping language tokens, "
-                        "target audio, and audio-reference segments, whatever "
-                        "top-k picks. Qwen vision tokens and visual "
-                        "conditioning/reference blocks are not force-selected. "
-                        "Audio is about 1% of the packed sequence -- 19 key "
-                        "blocks of 1794 at 768p/15s -- so plain top-k can drop "
-                        "all of it while the video still looks fine. Turn off "
-                        "only to reproduce lightx2v's uniform selection "
-                        "exactly.")),
+                        "Protect Audio / Language. True guarantees every "
+                        "language-token, target-audio, and reference-audio "
+                        "block. Manual guarantees only the best-scoring "
+                        "fraction selected by audio_sparsity_ratio. Off adds "
+                        "no special quota; these blocks still participate in "
+                        "ordinary top-k. True preserves the previous default.")),
                 io.Boolean.Input("enabled", default=True,
                     label_on="sparse", label_off="dense (bypass)",
                     optional=True,
@@ -192,7 +189,7 @@ class H3SLAAttention(io.ComfyNode):
                         "remain step-local. It is a fix for that one specific "
                         "symptom, not a general quality dial.")),
                 io.Combo.Input("reference_protection",
-                    options=list(REFERENCE_PROTECTION_MODES), default="Off",
+                    options=list(PROTECTION_MODES), default="Off",
                     optional=True,
                     tooltip=(
                         "Protect Video/Image Reference. True guarantees every "
@@ -213,17 +210,26 @@ class H3SLAAttention(io.ComfyNode):
                         "sparsity_ratio for matching nominal sparsity. The "
                         "quota is added on top of normal top-k so it never "
                         "evicts ordinary video selections.")),
+                io.Float.Input("audio_sparsity_ratio", default=0.80,
+                    min=0.0, max=0.99, step=0.05, round=False, optional=True,
+                    tooltip=(
+                        "Used only when Protect Audio / Language is Manual. "
+                        "Fraction skipped inside each language, reference-"
+                        "audio, and target-audio range: 0.80 keeps the best "
+                        "20%; 0.90 keeps 10%; 0.00 keeps all. The quota is "
+                        "additive and never evicts ordinary video selections.")),
             ],
             outputs=[io.Model.Output()],
         )
 
     @classmethod
     def execute(cls, model, sparsity_ratio=0.90, block_size="64",
-                min_seq_len=4096, dense_last_steps=1, protect_audio=True,
+                min_seq_len=4096, dense_last_steps=1, protect_audio="True",
                 enabled=True, dense_steps="0", dense_backend="comfy_kitchen",
                 disable_fp16_accum=True, stabilize_motion=True,
                 reference_protection="Off",
-                reference_sparsity_ratio=0.80) -> io.NodeOutput:
+                reference_sparsity_ratio=0.80,
+                audio_sparsity_ratio=0.80) -> io.NodeOutput:
         if not enabled:
             log.info("[H3Utils] SLA disabled; model passed through unchanged.")
             return io.NodeOutput(model)
@@ -243,6 +249,7 @@ class H3SLAAttention(io.ComfyNode):
                 stabilize_motion=stabilize_motion,
                 reference_protection=reference_protection,
                 reference_sparsity_ratio=reference_sparsity_ratio,
+                audio_sparsity_ratio=audio_sparsity_ratio,
             )
         except Exception:                                # noqa: BLE001
             # Triton missing, an incompatible GPU, a ComfyUI API change -- none

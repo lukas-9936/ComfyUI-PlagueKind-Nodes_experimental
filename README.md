@@ -23,7 +23,8 @@ The original `protect_audio` implementation broadly protected every packed
 block before target video. With large image/video references, that also made
 all visual-reference blocks mandatory for every attention query.
 
-This fork identifies the packed MiniMax H3 segments and always protects only:
+This fork identifies the packed MiniMax H3 segments. With audio protection set
+to its default `True`, it guarantees only:
 
 - actual language tokens;
 - reference-audio blocks;
@@ -36,6 +37,28 @@ top-k selection instead of being mandatory.
 Motion-stabilization history is limited to target-video query rows. Video
 stabilization continues to work, while text and audio routing is recalculated
 for each denoising step.
+
+### Protect Audio / Language
+
+The former Boolean `protect_audio` control now has three modes. It covers the
+actual language-token, reference-audio, and target-audio ranges together:
+
+| Mode | Behaviour | Typical use |
+| --- | --- | --- |
+| `True` | Guarantees every language and audio block. | Safest audio behaviour and the default. |
+| `Manual` | Guarantees a score-selected fraction inside each language/audio range. | Experiment with lower overhead while retaining an audio minimum. |
+| `Off` | Adds no dedicated language/audio quota; those blocks still compete in global top-k. | LightX2V-style uniform sparsity and maximum speed. |
+
+When `Manual` is selected, the node reveals `Audio Sparsity Ratio`:
+
+- `0.80` skips 80% and guarantees the best-scoring 20% of each language,
+  reference-audio, and target-audio range;
+- `0.90` skips 90% and guarantees the best-scoring 10%;
+- `0.00` guarantees all language/audio blocks.
+
+The Manual quota is additive and does not evict ordinary video selections.
+Existing workflows that stored the old Boolean remain compatible: `true` maps
+to `True`, while `false` maps to `Off`.
 
 ### Protect Video/Image Reference
 
@@ -67,6 +90,9 @@ hidden in the ComfyUI node for `Off` and `True`.
 
 ## Suggested starting points
 
+- Safest audio behaviour: audio `True`.
+- Experimental partial audio protection: audio `Manual`, `0.80`.
+- LightX2V-style audio routing: audio `Off`.
 - No visual reference or maximum speed: `Off`.
 - Reference image/video with a cautious speed compromise: `Manual`, `0.80`.
 - Lighter protection: `Manual`, `0.90`.
@@ -95,8 +121,8 @@ slider script is reloaded.
 - Requires the same dependencies as the upstream node pack.
 - H3 SLA Attention requires Triton and a supported GPU; unsupported setups
   fall back safely as in upstream.
-- Existing workflows remain compatible because the new controls were appended
-  to the node inputs and default to `Off`.
+- Existing workflows remain compatible: legacy audio Booleans are accepted,
+  and both numeric Manual controls were appended to the node inputs.
 
 ## Upstream and license
 
